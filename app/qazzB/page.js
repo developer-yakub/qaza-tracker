@@ -19,12 +19,12 @@ import {
 import { auth, db } from "@/lib/firebase";
 
 const PRAYERS = [
-  { key: "fajr", label: "Fajr", arabic: "الفجر" },
-  { key: "zuhr", label: "Zuhr", arabic: "الظهر" },
-  { key: "asr", label: "Asr", arabic: "العصر" },
-  { key: "maghrib", label: "Maghrib", arabic: "المغرب" },
-  { key: "isha", label: "Isha", arabic: "العشاء" },
-  { key: "witr", label: "Witr", arabic: "الوتر" },
+  { key: "fajr", label: "Fajr", arabic: "الفجر", type: "Fard" },
+  { key: "zuhr", label: "Zuhr", arabic: "الظهر", type: "Fard" },
+  { key: "asr", label: "Asr", arabic: "العصر", type: "Fard" },
+  { key: "maghrib", label: "Maghrib", arabic: "المغرب", type: "Fard" },
+  { key: "isha", label: "Isha", arabic: "العشاء", type: "Fard" },
+  { key: "witr", label: "Witr", arabic: "الوتر", type: "Wajib" },
 ];
 
 const EMPTY_COUNTS = {
@@ -71,14 +71,19 @@ function formatMonth(date) {
   });
 }
 
+function getTodayString() {
+  return dateKey(new Date());
+}
+
 export default function QazaPage() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [savingPrayer, setSavingPrayer] = useState(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  // Dates initialize after mounting to avoid Next.js prerender errors.
+  // Initialize dates in the browser to avoid Next.js prerender errors.
   const [todayKey, setTodayKey] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [visibleMonth, setVisibleMonth] = useState(null);
@@ -92,6 +97,7 @@ export default function QazaPage() {
   const [showCalculator, setShowCalculator] = useState(false);
   const [fromDate, setFromDate] = useState("2019-10-23");
   const [toDate, setToDate] = useState("2026-10-23");
+
   const [selectedPrayers, setSelectedPrayers] = useState({
     fajr: true,
     zuhr: true,
@@ -100,10 +106,12 @@ export default function QazaPage() {
     isha: true,
     witr: true,
   });
+
   const [dayAdjustment, setDayAdjustment] = useState("0");
 
   useEffect(() => {
     const now = new Date();
+
     setTodayKey(dateKey(now));
     setSelectedDate(now);
     setVisibleMonth(
@@ -157,6 +165,7 @@ export default function QazaPage() {
 
       if (settingsSnapshot.exists()) {
         const settings = settingsSnapshot.data();
+
         setTargets(normalizeCounts(settings.targets || {}));
         setDarkMode(Boolean(settings.darkMode));
       } else {
@@ -213,13 +222,18 @@ export default function QazaPage() {
     0
   );
 
-  const totalCompleted = Math.max(
-    0,
-    totalTarget - totalRecorded
+  const totalRemaining = PRAYERS.reduce(
+    (sum, prayer) =>
+      sum +
+      Math.max(
+        0,
+        getNumber(targets[prayer.key]) -
+          getNumber(totals[prayer.key])
+      ),
+    0
   );
 
-  // Count both the start date and end date.
-  // UTC avoids daylight-saving and date-boundary calculation errors.
+  // Inclusive date calculation using UTC.
   const calculatorDays = useMemo(() => {
     if (!fromDate || !toDate) return 0;
 
@@ -229,11 +243,7 @@ export default function QazaPage() {
     const start = Date.UTC(fy, fm - 1, fd);
     const end = Date.UTC(ty, tm - 1, td);
 
-    if (
-      !Number.isFinite(start) ||
-      !Number.isFinite(end) ||
-      end < start
-    ) {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
       return 0;
     }
 
@@ -250,8 +260,7 @@ export default function QazaPage() {
     ({ key }) => selectedPrayers[key]
   ).length;
 
-  const estimatedPrayers =
-    adjustedDays * selectedPrayerCount;
+  const estimatedPrayers = adjustedDays * selectedPrayerCount;
 
   function toggleCalculatorPrayer(key) {
     setSelectedPrayers((previous) => ({
@@ -287,6 +296,7 @@ export default function QazaPage() {
       setMessage("");
       setError("");
     } catch (err) {
+      console.error(err);
       setError("Could not sign out. Please try again.");
     }
   }
@@ -307,13 +317,7 @@ export default function QazaPage() {
 
     try {
       await setDoc(
-        doc(
-          db,
-          "users",
-          user.uid,
-          "qazaRecords",
-          selectedKey
-        ),
+        doc(db, "users", user.uid, "qazaRecords", selectedKey),
         {
           ...normalized,
           date: selectedKey,
@@ -322,7 +326,7 @@ export default function QazaPage() {
         { merge: true }
       );
 
-      setMessage("Qaza record saved.");
+      setMessage("Daily Qaza record saved.");
       return true;
     } catch (err) {
       console.error("Failed to save Qaza record:", err);
@@ -361,6 +365,55 @@ export default function QazaPage() {
     await saveRecord(nextCounts);
   }
 
+  // ADD QAZA: Increase only the selected prayer's overall target.
+  async function addQazaToPrayer(key) {
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (savingPrayer) return;
+
+    setError("");
+    setMessage("");
+    setSavingPrayer(key);
+
+    const previousTargets = targets;
+    const nextTargets = {
+      ...targets,
+      [key]: getNumber(targets[key]) + 1,
+    };
+
+    // Update the screen immediately.
+    setTargets(nextTargets);
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: nextTargets,
+          darkMode,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      const prayer = PRAYERS.find((item) => item.key === key);
+
+      setMessage(`Added 1 Qaza to ${prayer?.label || key}.`);
+    } catch (err) {
+      console.error("Failed to add Qaza:", err);
+
+      setTargets(previousTargets);
+      setError(
+        "Could not add Qaza. Please check your connection and try again."
+      );
+    } finally {
+      setSavingPrayer(null);
+    }
+  }
+
+  // Apply the calculator result to selected prayer targets.
   async function applyCalculatorToTargets() {
     if (!user) {
       setError("Please sign in first.");
@@ -368,12 +421,11 @@ export default function QazaPage() {
     }
 
     if (calculatorDays <= 0 || selectedPrayerCount === 0) {
-      setError(
-        "Choose a valid date range and at least one prayer."
-      );
+      setError("Choose a valid date range and at least one prayer.");
       return;
     }
 
+    const previousTargets = targets;
     const nextTargets = { ...targets };
 
     PRAYERS.forEach(({ key }) => {
@@ -382,6 +434,34 @@ export default function QazaPage() {
       }
     });
 
+    setTargets(nextTargets);
+    setError("");
+    setMessage("");
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: nextTargets,
+          darkMode,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      setShowCalculator(false);
+      setMessage("Qaza targets updated successfully.");
+    } catch (err) {
+      console.error("Failed to apply calculator:", err);
+      setTargets(previousTargets);
+      setError("Could not update targets. Please try again.");
+    }
+  }
+
+  async function saveTargets() {
+    if (!user) return;
+
+    const nextTargets = normalizeCounts(targets);
     setError("");
     setMessage("");
 
@@ -397,48 +477,18 @@ export default function QazaPage() {
       );
 
       setTargets(nextTargets);
-      setShowCalculator(false);
-      setMessage("Qaza targets updated successfully.");
-    } catch (err) {
-      console.error(
-        "Failed to apply Qaza calculator:",
-        err
-      );
-
-      setError(
-        "Could not update targets. Check your Firestore rules."
-      );
-    }
-  }
-
-  async function saveTargets() {
-    if (!user) return;
-
-    setError("");
-
-    try {
-      await setDoc(
-        settingsRef(user.uid),
-        {
-          targets: normalizeCounts(targets),
-          darkMode,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-
       setShowTargets(false);
       setMessage("Targets saved.");
     } catch (err) {
       console.error(err);
-      setError(
-        "Could not save targets. Check your Firestore rules."
-      );
+      setError("Could not save targets. Check your Firestore rules.");
     }
   }
 
   async function toggleDarkMode() {
     const nextValue = !darkMode;
+    const previousValue = darkMode;
+
     setDarkMode(nextValue);
 
     if (!user) return;
@@ -454,9 +504,8 @@ export default function QazaPage() {
         { merge: true }
       );
     } catch (err) {
-      setError(
-        "Theme changed locally, but could not be saved."
-      );
+      setDarkMode(previousValue);
+      setError("Could not save the theme preference.");
     }
   }
 
@@ -498,17 +547,22 @@ export default function QazaPage() {
     );
   }
 
+  function goToToday() {
+    const now = new Date();
+
+    setSelectedDate(now);
+    setVisibleMonth(
+      new Date(now.getFullYear(), now.getMonth(), 1)
+    );
+  }
+
   const calendarDays = useMemo(() => {
     if (!visibleMonth) return [];
 
     const year = visibleMonth.getFullYear();
     const month = visibleMonth.getMonth();
     const firstDay = new Date(year, month, 1).getDay();
-    const daysInMonth = new Date(
-      year,
-      month + 1,
-      0
-    ).getDate();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
 
     return [
       ...Array(firstDay).fill(null),
@@ -532,20 +586,18 @@ export default function QazaPage() {
     : "text-slate-500";
 
   const inputClass = darkMode
-    ? "w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-3 text-slate-100 outline-none focus:border-emerald-500"
-    : "w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-emerald-500";
+    ? "w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-slate-100 outline-none focus:border-emerald-500"
+    : "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:border-emerald-500";
 
   const buttonClass = darkMode
-    ? "rounded-lg border border-slate-700 px-3 py-2 hover:bg-slate-800"
-    : "rounded-lg border border-slate-300 px-3 py-2 hover:bg-slate-100";
+    ? "rounded-xl border border-slate-700 px-4 py-2 hover:bg-slate-800"
+    : "rounded-xl border border-slate-200 px-4 py-2 hover:bg-slate-100";
 
   if (authLoading) {
     return (
       <main className={pageClass}>
         <div className="flex min-h-screen items-center justify-center">
-          <p className={mutedClass}>
-            Checking your sign-in...
-          </p>
+          <p className={mutedClass}>Checking your sign-in...</p>
         </div>
       </main>
     );
@@ -555,13 +607,10 @@ export default function QazaPage() {
     return (
       <main className={pageClass}>
         <div className="flex min-h-screen items-center justify-center p-5">
-          <section
-            className={`${panelClass} w-full max-w-md text-center`}
-          >
+          <section className={`${panelClass} w-full max-w-md text-center`}>
             <div className="mb-4 text-5xl">🕌</div>
-            <h1 className="text-3xl font-bold">
-              Qaza Tracker
-            </h1>
+            <h1 className="text-3xl font-bold">Qaza Tracker</h1>
+
             <p className={`mt-3 ${mutedClass}`}>
               Sign in to track missed prayers and sync your records.
             </p>
@@ -587,40 +636,31 @@ export default function QazaPage() {
   return (
     <main className={pageClass}>
       <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+        {/* HEADER */}
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="text-sm font-medium text-emerald-500">
               YOUR DAILY WORSHIP
             </p>
-            <h1 className="mt-1 text-3xl font-bold">
-              Qaza Tracker
-            </h1>
+            <h1 className="mt-1 text-3xl font-bold">Qaza Tracker</h1>
             <p className={`mt-1 text-sm ${mutedClass}`}>
               Track your missed prayers, one day at a time.
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <button
-              onClick={toggleDarkMode}
-              className={buttonClass}
-            >
+            <button onClick={toggleDarkMode} className={buttonClass}>
               {darkMode ? "☀️ Light mode" : "🌙 Dark mode"}
             </button>
 
             <button
-              onClick={() =>
-                setShowTargets((value) => !value)
-              }
+              onClick={() => setShowTargets((value) => !value)}
               className={buttonClass}
             >
               Targets
             </button>
 
-            <button
-              onClick={handleSignOut}
-              className={buttonClass}
-            >
+            <button onClick={handleSignOut} className={buttonClass}>
               Sign out
             </button>
           </div>
@@ -638,21 +678,19 @@ export default function QazaPage() {
           </div>
         )}
 
-        {/* QAZA DATE CALCULATOR LAUNCHER */}
+        {/* QAZA CALCULATOR LAUNCHER */}
         <section className={panelClass}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-bold">
-                Qaza Date Calculator
-              </h2>
+              <h2 className="text-xl font-bold">Qaza Date Calculator</h2>
               <p className={`mt-1 text-sm ${mutedClass}`}>
-                Calculate missed prayers for a selected date range.
+                Calculate missed prayers using a date range.
               </p>
             </div>
 
             <button
               onClick={() => setShowCalculator(true)}
-              className="rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white hover:bg-emerald-700"
+              className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700"
             >
               Open calculator
             </button>
@@ -701,12 +739,9 @@ export default function QazaPage() {
                 </button>
               </div>
 
-              {/* DATE RANGE */}
               <div className="mt-8 grid gap-5 sm:grid-cols-2">
                 <label className="block">
-                  <span className="mb-3 block font-medium">
-                    From date
-                  </span>
+                  <span className="mb-3 block font-medium">From date</span>
                   <input
                     type="date"
                     value={fromDate}
@@ -720,9 +755,7 @@ export default function QazaPage() {
                 </label>
 
                 <label className="block">
-                  <span className="mb-3 block font-medium">
-                    To date
-                  </span>
+                  <span className="mb-3 block font-medium">To date</span>
                   <input
                     type="date"
                     value={toDate}
@@ -737,7 +770,6 @@ export default function QazaPage() {
                 </label>
               </div>
 
-              {/* PRAYER SELECTION */}
               <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
                 <h3 className="text-xl font-bold">
                   Select prayers to include
@@ -746,16 +778,12 @@ export default function QazaPage() {
                 <button
                   onClick={() =>
                     selectAllCalculatorPrayers(
-                      !PRAYERS.every(
-                        ({ key }) => selectedPrayers[key]
-                      )
+                      !PRAYERS.every(({ key }) => selectedPrayers[key])
                     )
                   }
                   className="font-semibold text-emerald-500"
                 >
-                  {PRAYERS.every(
-                    ({ key }) => selectedPrayers[key]
-                  )
+                  {PRAYERS.every(({ key }) => selectedPrayers[key])
                     ? "Deselect all"
                     : "Select all"}
                 </button>
@@ -776,9 +804,7 @@ export default function QazaPage() {
                     <input
                       type="checkbox"
                       checked={selectedPrayers[prayer.key]}
-                      onChange={() =>
-                        toggleCalculatorPrayer(prayer.key)
-                      }
+                      onChange={() => toggleCalculatorPrayer(prayer.key)}
                       className="h-5 w-5 accent-emerald-600"
                     />
 
@@ -787,19 +813,16 @@ export default function QazaPage() {
                         {prayer.label}
                       </span>
                       <span className={`block text-sm ${mutedClass}`}>
-                        {prayer.key === "witr" ? "Wajib" : "Fard"}
+                        {prayer.type}
                       </span>
                     </span>
                   </label>
                 ))}
               </div>
 
-              {/* CALCULATION RESULTS */}
               <div
                 className={`mt-7 rounded-3xl p-6 ${
-                  darkMode
-                    ? "bg-emerald-950/50"
-                    : "bg-emerald-50"
+                  darkMode ? "bg-emerald-950/50" : "bg-emerald-50"
                 }`}
               >
                 <p className={mutedClass}>
@@ -811,9 +834,7 @@ export default function QazaPage() {
                 </p>
 
                 <div className="mt-7 flex flex-wrap items-center justify-between gap-3">
-                  <span className={mutedClass}>
-                    Estimated prayers
-                  </span>
+                  <span className={mutedClass}>Estimated prayers</span>
                   <span className="text-3xl font-bold text-emerald-500">
                     {estimatedPrayers.toLocaleString("en-IN")}
                   </span>
@@ -842,10 +863,7 @@ export default function QazaPage() {
 
                       setDayAdjustment(
                         String(
-                          Math.min(
-                            calculatorDays,
-                            getNumber(raw)
-                          )
+                          Math.min(calculatorDays, getNumber(raw))
                         )
                       );
                     }}
@@ -859,7 +877,6 @@ export default function QazaPage() {
                 </label>
               </div>
 
-              {/* ACTIONS */}
               <div className="mt-7 flex flex-wrap justify-end gap-3">
                 <button
                   onClick={() => setShowCalculator(false)}
@@ -870,10 +887,7 @@ export default function QazaPage() {
 
                 <button
                   onClick={applyCalculatorToTargets}
-                  disabled={
-                    adjustedDays === 0 ||
-                    selectedPrayerCount === 0
-                  }
+                  disabled={adjustedDays === 0 || selectedPrayerCount === 0}
                   className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Apply to targets
@@ -881,10 +895,9 @@ export default function QazaPage() {
               </div>
 
               <p className={`mt-6 text-sm leading-7 ${mutedClass}`}>
-                Applying replaces the target for each selected
-                prayer with the number of adjusted days in the
-                chosen period. Unselected targets remain unchanged.
-                Review the estimate before applying it.
+                Applying replaces the target for each selected prayer with
+                the adjusted number of days. Unselected targets remain
+                unchanged. Review your estimate before applying.
               </p>
             </div>
           </div>
@@ -900,13 +913,8 @@ export default function QazaPage() {
 
             <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {PRAYERS.map((prayer) => (
-                <label
-                  key={prayer.key}
-                  className="space-y-2"
-                >
-                  <span className="block font-medium">
-                    {prayer.label}
-                  </span>
+                <label key={prayer.key} className="space-y-2">
+                  <span className="block font-medium">{prayer.label}</span>
                   <input
                     type="number"
                     min="0"
@@ -914,9 +922,7 @@ export default function QazaPage() {
                     onChange={(event) =>
                       setTargets((previous) => ({
                         ...previous,
-                        [prayer.key]: getNumber(
-                          event.target.value
-                        ),
+                        [prayer.key]: getNumber(event.target.value),
                       }))
                     }
                     className={inputClass}
@@ -927,7 +933,7 @@ export default function QazaPage() {
 
             <button
               onClick={saveTargets}
-              className="mt-5 rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white hover:bg-emerald-700"
+              className="mt-5 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700"
             >
               Save targets
             </button>
@@ -937,40 +943,24 @@ export default function QazaPage() {
         {/* SUMMARY CARDS */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className={panelClass}>
-            <p className={`text-sm ${mutedClass}`}>
-              Recorded Qaza prayers
-            </p>
-            <p className="mt-2 text-3xl font-bold">
-              {totalRecorded}
-            </p>
+            <p className={`text-sm ${mutedClass}`}>Recorded Qaza prayers</p>
+            <p className="mt-2 text-3xl font-bold">{totalRecorded}</p>
           </div>
 
           <div className={panelClass}>
-            <p className={`text-sm ${mutedClass}`}>
-              Total target
-            </p>
-            <p className="mt-2 text-3xl font-bold">
-              {totalTarget}
-            </p>
+            <p className={`text-sm ${mutedClass}`}>Total target</p>
+            <p className="mt-2 text-3xl font-bold">{totalTarget}</p>
           </div>
 
           <div className={panelClass}>
-            <p className={`text-sm ${mutedClass}`}>
-              Target minus recorded
-            </p>
-            <p className="mt-2 text-3xl font-bold">
-              {totalCompleted}
-            </p>
+            <p className={`text-sm ${mutedClass}`}>Target remaining</p>
+            <p className="mt-2 text-3xl font-bold">{totalRemaining}</p>
           </div>
 
           <div className={panelClass}>
-            <p className={`text-sm ${mutedClass}`}>
-              Selected day
-            </p>
+            <p className={`text-sm ${mutedClass}`}>Selected day</p>
             <p className="mt-2 text-xl font-bold">
-              {selectedDate
-                ? formatDate(selectedDate)
-                : "Loading date..."}
+              {selectedDate ? formatDate(selectedDate) : "Loading date..."}
             </p>
           </div>
         </section>
@@ -989,9 +979,7 @@ export default function QazaPage() {
               </button>
 
               <h2 className="text-xl font-bold">
-                {visibleMonth
-                  ? formatMonth(visibleMonth)
-                  : "Calendar"}
+                {visibleMonth ? formatMonth(visibleMonth) : "Calendar"}
               </h2>
 
               <button
@@ -1005,22 +993,13 @@ export default function QazaPage() {
             </div>
 
             <div className="mt-5 grid grid-cols-7 gap-1 text-center text-sm">
-              {[
-                "Sun",
-                "Mon",
-                "Tue",
-                "Wed",
-                "Thu",
-                "Fri",
-                "Sat",
-              ].map((day) => (
-                <div
-                  key={day}
-                  className={`py-2 font-semibold ${mutedClass}`}
-                >
-                  {day}
-                </div>
-              ))}
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
+                (day) => (
+                  <div key={day} className={`py-2 font-semibold ${mutedClass}`}>
+                    {day}
+                  </div>
+                )
+              )}
 
               {calendarDays.map((day, index) => {
                 if (day === null) {
@@ -1052,15 +1031,13 @@ export default function QazaPage() {
                     onClick={() => selectCalendarDay(day)}
                     className={`relative flex min-h-11 items-center justify-center rounded-lg ${dayClass}`}
                     aria-pressed={isSelected}
+                    aria-label={`${day} ${formatMonth(visibleMonth)}`}
                   >
                     {day}
-
                     {hasRecords && (
                       <span
                         className={`absolute bottom-1 h-1 w-1 rounded-full ${
-                          isSelected
-                            ? "bg-white"
-                            : "bg-emerald-500"
+                          isSelected ? "bg-white" : "bg-emerald-500"
                         }`}
                       />
                     )}
@@ -1070,19 +1047,7 @@ export default function QazaPage() {
             </div>
 
             <button
-              onClick={() => {
-                if (!todayKey) return;
-
-                const now = new Date();
-                setSelectedDate(now);
-                setVisibleMonth(
-                  new Date(
-                    now.getFullYear(),
-                    now.getMonth(),
-                    1
-                  )
-                );
-              }}
+              onClick={goToToday}
               disabled={!todayKey}
               className={`mt-4 w-full ${buttonClass}`}
             >
@@ -1090,75 +1055,90 @@ export default function QazaPage() {
             </button>
           </section>
 
-          {/* DAILY COUNTERS */}
+          {/* DAILY QAZA COUNTERS + ADD QAZA BUTTON */}
           <section className={panelClass}>
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h2 className="text-xl font-bold">
-                  Daily Qaza counts
-                </h2>
+                <h2 className="text-xl font-bold">Daily Qaza counts</h2>
                 <p className={`mt-1 text-sm ${mutedClass}`}>
-                  {selectedDate
-                    ? formatDate(selectedDate)
-                    : "Loading date..."}
+                  {selectedDate ? formatDate(selectedDate) : "Loading date..."}
                 </p>
               </div>
 
-              <button
-                onClick={resetSelectedDate}
-                className={buttonClass}
-              >
+              <button onClick={resetSelectedDate} className={buttonClass}>
                 Reset day
               </button>
             </div>
 
-            <div className="mt-5 space-y-3">
+            <div className="mt-5 space-y-5">
               {PRAYERS.map((prayer) => (
                 <div
                   key={prayer.key}
-                  className={`flex items-center gap-3 rounded-xl border p-3 ${
-                    darkMode
-                      ? "border-slate-800"
-                      : "border-slate-200"
+                  className={`flex flex-wrap items-center justify-between gap-4 rounded-3xl border p-5 ${
+                    darkMode ? "border-slate-700" : "border-slate-200"
                   }`}
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="font-semibold">
-                      {prayer.label}
+                    <h3 className="text-2xl font-bold">{prayer.label}</h3>
+
+                    <p className={`mt-1 ${mutedClass}`}>
+                      {prayer.type}
                     </p>
+
+                    <button
+                      onClick={() => addQazaToPrayer(prayer.key)}
+                      disabled={savingPrayer !== null}
+                      className="mt-4 rounded-2xl bg-orange-100 px-5 py-3 font-semibold text-orange-700 transition hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {savingPrayer === prayer.key
+                        ? "Adding..."
+                        : "Add Qaza"}
+                    </button>
+
+                    <p className={`mt-2 text-sm ${mutedClass}`}>
+                      Target: {getNumber(targets[prayer.key])}
+                    </p>
+
                     <p className={`text-sm ${mutedClass}`}>
-                      {prayer.arabic}
+                      Recorded: {getNumber(totals[prayer.key])}
+                    </p>
+
+                    <p className={`text-sm font-medium ${mutedClass}`}>
+                      Remaining:{" "}
+                      {Math.max(
+                        0,
+                        getNumber(targets[prayer.key]) -
+                          getNumber(totals[prayer.key])
+                      )}
                     </p>
                   </div>
 
-                  <button
-                    onClick={() =>
-                      updatePrayer(prayer.key, -1)
-                    }
-                    disabled={
-                      !selectedKey ||
-                      !selectedCounts[prayer.key]
-                    }
-                    className={`${buttonClass} h-10 w-10 disabled:opacity-40`}
-                    aria-label={`Decrease ${prayer.label}`}
-                  >
-                    −
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => updatePrayer(prayer.key, -1)}
+                      disabled={
+                        !selectedKey ||
+                        !selectedCounts[prayer.key]
+                      }
+                      className={`flex h-14 w-14 items-center justify-center rounded-2xl border text-2xl disabled:cursor-not-allowed disabled:opacity-40 ${buttonClass}`}
+                      aria-label={`Decrease ${prayer.label} daily count`}
+                    >
+                      −
+                    </button>
 
-                  <span className="w-10 text-center text-xl font-bold tabular-nums">
-                    {selectedCounts[prayer.key]}
-                  </span>
+                    <span className="w-8 text-center text-2xl font-bold tabular-nums">
+                      {selectedCounts[prayer.key]}
+                    </span>
 
-                  <button
-                    onClick={() =>
-                      updatePrayer(prayer.key, 1)
-                    }
-                    disabled={!selectedKey}
-                    className="h-10 w-10 rounded-lg bg-emerald-600 font-bold text-white hover:bg-emerald-700 disabled:opacity-40"
-                    aria-label={`Increase ${prayer.label}`}
-                  >
-                    +
-                  </button>
+                    <button
+                      onClick={() => updatePrayer(prayer.key, 1)}
+                      disabled={!selectedKey}
+                      className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-600 text-3xl text-white hover:bg-emerald-700 disabled:opacity-40"
+                      aria-label={`Increase ${prayer.label} daily count`}
+                    >
+                      +
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1168,14 +1148,11 @@ export default function QazaPage() {
                 darkMode ? "bg-slate-800" : "bg-slate-100"
               }`}
             >
-              <span className="font-semibold">
-                Selected-day total
-              </span>
+              <span className="font-semibold">Selected-day total</span>
               <span className="text-2xl font-bold">
                 {PRAYERS.reduce(
                   (sum, prayer) =>
-                    sum +
-                    getNumber(selectedCounts[prayer.key]),
+                    sum + getNumber(selectedCounts[prayer.key]),
                   0
                 )}
               </span>
@@ -1185,43 +1162,34 @@ export default function QazaPage() {
 
         {/* PRAYER SUMMARY */}
         <section className={panelClass}>
-          <h2 className="text-xl font-bold">
-            Prayer summary
-          </h2>
+          <h2 className="text-xl font-bold">Prayer summary</h2>
           <p className={`mt-1 text-sm ${mutedClass}`}>
-            Recorded counts across all saved dates.
+            Recorded counts across all saved dates compared with your targets.
           </p>
 
           <div className="mt-4 space-y-4">
             {PRAYERS.map((prayer) => {
               const target = getNumber(targets[prayer.key]);
               const recorded = getNumber(totals[prayer.key]);
+              const remaining = Math.max(0, target - recorded);
 
               const progress =
                 target > 0
-                  ? Math.min(
-                      100,
-                      Math.round((recorded / target) * 100)
-                    )
+                  ? Math.min(100, Math.round((recorded / target) * 100))
                   : 0;
 
               return (
                 <div key={prayer.key}>
                   <div className="mb-2 flex items-center justify-between gap-3">
-                    <span className="font-medium">
-                      {prayer.label}
-                    </span>
+                    <span className="font-medium">{prayer.label}</span>
                     <span className={`text-sm ${mutedClass}`}>
-                      {recorded} recorded
-                      {target > 0 ? ` / ${target} target` : ""}
+                      {recorded} recorded / {target} target / {remaining} remaining
                     </span>
                   </div>
 
                   <div
                     className={`h-2 overflow-hidden rounded-full ${
-                      darkMode
-                        ? "bg-slate-800"
-                        : "bg-slate-200"
+                      darkMode ? "bg-slate-800" : "bg-slate-200"
                     }`}
                   >
                     <div
@@ -1236,7 +1204,7 @@ export default function QazaPage() {
         </section>
 
         <footer className={`pb-4 text-center text-sm ${mutedClass}`}>
-          Your records are saved to your signed-in Firebase account.
+          Your records and targets are saved to your signed-in Firebase account.
         </footer>
       </div>
     </main>

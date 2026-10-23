@@ -1,115 +1,104 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ChevronLeft,
-  ChevronRight,
-  Minus,
-  Plus,
-  CalendarDays,
-  CheckCircle2,
-  Target,
-  Sun,
-  Moon,
-  RotateCcw,
-  Calculator,
-  X,
-} from "lucide-react";
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from "firebase/auth";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  serverTimestamp,
+} from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
 
 const PRAYERS = [
-  { id: "fajr", name: "Fajr", type: "Fard" },
-  { id: "zuhr", name: "Zuhr", type: "Fard" },
-  { id: "asr", name: "Asr", type: "Fard" },
-  { id: "maghrib", name: "Maghrib", type: "Fard" },
-  { id: "isha", name: "Isha", type: "Fard" },
-  { id: "witr", name: "Witr", type: "Wajib" },
+  { key: "fajr", label: "Fajr", arabic: "الفجر", type: "Fard" },
+  { key: "zuhr", label: "Zuhr", arabic: "الظهر", type: "Fard" },
+  { key: "asr", label: "Asr", arabic: "العصر", type: "Fard" },
+  { key: "maghrib", label: "Maghrib", arabic: "المغرب", type: "Fard" },
+  { key: "isha", label: "Isha", arabic: "العشاء", type: "Fard" },
+  { key: "witr", label: "Witr", arabic: "الوتر", type: "Wajib" },
 ];
 
-const DEFAULT_TARGETS = {
-  fajr: 2555,
-  zuhr: 2555,
-  asr: 2555,
-  maghrib: 2555,
-  isha: 2555,
-  witr: 2555,
+const EMPTY_COUNTS = {
+  fajr: 0,
+  zuhr: 0,
+  asr: 0,
+  maghrib: 0,
+  isha: 0,
+  witr: 0,
 };
-
-const MONTHS = [
-  "January", "February", "March", "April",
-  "May", "June", "July", "August",
-  "September", "October", "November", "December",
-];
 
 function dateKey(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-
   return `${year}-${month}-${day}`;
 }
 
+function getNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number)
+    ? Math.max(0, Math.floor(number))
+    : 0;
+}
+
+function normalizeCounts(data = {}) {
+  return Object.fromEntries(
+    PRAYERS.map(({ key }) => [key, getNumber(data[key])])
+  );
+}
+
 function formatDate(date) {
-  return new Intl.DateTimeFormat("en-IN", {
-    weekday: "long",
+  return date.toLocaleDateString("en-IN", {
     day: "numeric",
     month: "long",
     year: "numeric",
-  }).format(date);
+  });
 }
 
-function getDayTotal(log, date) {
-  const record = log[dateKey(date)] || {};
-
-  return PRAYERS.reduce(
-    (sum, prayer) => sum + Number(record[prayer.id] || 0),
-    0
-  );
+function formatMonth(date) {
+  return date.toLocaleDateString("en-IN", {
+    month: "long",
+    year: "numeric",
+  });
 }
 
-function getPrayerTotal(log, prayerId) {
-  return Object.values(log).reduce(
-    (sum, record) => sum + Number(record?.[prayerId] || 0),
-    0
-  );
+function getTodayString() {
+  return dateKey(new Date());
 }
 
-function calculateQazaDays(start, end) {
-  if (!start || !end || start > end) return 0;
+export default function QazaPage() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [savingPrayer, setSavingPrayer] = useState(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
-  const [sy, sm, sd] = start.split("-").map(Number);
-  const [ey, em, ed] = end.split("-").map(Number);
-
-  const startUTC = Date.UTC(sy, sm - 1, sd);
-  const endUTC = Date.UTC(ey, em - 1, ed);
-
-  return Math.floor((endUTC - startUTC) / 86400000) + 1;
-}
-
-export default function Home() {
-  const [dark, setDark] = useState(false);
-
-  // Initialize dates after mounting to avoid prerender warnings.
-  const [todayKey, setTodayKey] = useState("");
+  // Initialize dates in the browser to avoid Next.js prerender errors.
+  const [todayKey, setTodayKey] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [visibleMonth, setVisibleMonth] = useState(null);
 
-  // Completed Qaza entries.
-  const [log, setLog] = useState({});
+  const [records, setRecords] = useState({});
+  const [targets, setTargets] = useState(EMPTY_COUNTS);
+  const [darkMode, setDarkMode] = useState(false);
+  const [showTargets, setShowTargets] = useState(false);
 
-  // Total Qaza owed for each prayer.
-  const [targets, setTargets] = useState({ ...DEFAULT_TARGETS });
+  // Qaza date calculator
+  const [showCalculator, setShowCalculator] = useState(false);
+  const [fromDate, setFromDate] = useState("2019-10-23");
+  const [toDate, setToDate] = useState("2026-10-23");
 
-  // Missed prayers recorded for each date.
-  // Example: { "2026-10-23": { fajr: true, isha: true } }
-  const [missedQaza, setMissedQaza] = useState({});
-
-  // Qaza calculator state.
-  const [showQazaCalculator, setShowQazaCalculator] = useState(false);
-  const [qazaStartDate, setQazaStartDate] = useState("");
-  const [qazaEndDate, setQazaEndDate] = useState("");
-
-  const [calculatorPrayers, setCalculatorPrayers] = useState({
+  const [selectedPrayers, setSelectedPrayers] = useState({
     fajr: true,
     zuhr: true,
     asr: true,
@@ -118,180 +107,420 @@ export default function Home() {
     witr: true,
   });
 
+  const [dayAdjustment, setDayAdjustment] = useState("0");
+
   useEffect(() => {
-    const today = new Date();
-    const sevenYearsAgo = new Date(today);
+    const now = new Date();
 
-    sevenYearsAgo.setFullYear(sevenYearsAgo.getFullYear() - 7);
-
-    setTodayKey(dateKey(today));
-    setSelectedDate(today);
+    setTodayKey(dateKey(now));
+    setSelectedDate(now);
     setVisibleMonth(
-      new Date(today.getFullYear(), today.getMonth(), 1)
+      new Date(now.getFullYear(), now.getMonth(), 1)
     );
-    setQazaStartDate(dateKey(sevenYearsAgo));
-    setQazaEndDate(dateKey(today));
   }, []);
 
-  const completedByPrayer = useMemo(
+  useEffect(() => {
+    return onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+  }, []);
+
+  const recordCollection = useCallback(
+    (uid) => collection(db, "users", uid, "qazaRecords"),
+    []
+  );
+
+  const settingsRef = useCallback(
+    (uid) => doc(db, "users", uid, "settings", "qazaTracker"),
+    []
+  );
+
+  const loadData = useCallback(async () => {
+    if (!user) {
+      setRecords({});
+      setTargets(EMPTY_COUNTS);
+      setDarkMode(false);
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const [recordsSnapshot, settingsSnapshot] = await Promise.all([
+        getDocs(recordCollection(user.uid)),
+        getDoc(settingsRef(user.uid)),
+      ]);
+
+      const nextRecords = {};
+
+      recordsSnapshot.forEach((recordDoc) => {
+        nextRecords[recordDoc.id] = normalizeCounts(
+          recordDoc.data()
+        );
+      });
+
+      setRecords(nextRecords);
+
+      if (settingsSnapshot.exists()) {
+        const settings = settingsSnapshot.data();
+
+        setTargets(normalizeCounts(settings.targets || {}));
+        setDarkMode(Boolean(settings.darkMode));
+      } else {
+        setTargets(EMPTY_COUNTS);
+        setDarkMode(false);
+      }
+    } catch (err) {
+      console.error("Failed to load Qaza data:", err);
+      setError(
+        "Could not load data. Check your connection and Firestore rules."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [user, recordCollection, settingsRef]);
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      loadData();
+    }
+  }, [authLoading, user, loadData]);
+
+  const selectedKey = selectedDate
+    ? dateKey(selectedDate)
+    : null;
+
+  const selectedCounts = useMemo(
     () =>
-      Object.fromEntries(
-        PRAYERS.map((prayer) => [
-          prayer.id,
-          getPrayerTotal(log, prayer.id),
-        ])
-      ),
-    [log]
+      selectedKey
+        ? records[selectedKey] || EMPTY_COUNTS
+        : EMPTY_COUNTS,
+    [records, selectedKey]
   );
 
-  const completedTotal = PRAYERS.reduce(
-    (sum, prayer) => sum + completedByPrayer[prayer.id],
+  const totals = useMemo(() => {
+    const result = { ...EMPTY_COUNTS };
+
+    Object.values(records).forEach((record) => {
+      PRAYERS.forEach(({ key }) => {
+        result[key] += getNumber(record[key]);
+      });
+    });
+
+    return result;
+  }, [records]);
+
+  const totalRecorded = PRAYERS.reduce(
+    (sum, prayer) => sum + totals[prayer.key],
     0
   );
 
-  const targetTotal = PRAYERS.reduce(
-    (sum, prayer) => sum + Number(targets[prayer.id] || 0),
+  const totalTarget = PRAYERS.reduce(
+    (sum, prayer) => sum + getNumber(targets[prayer.key]),
     0
   );
 
-  const remainingTotal = PRAYERS.reduce(
+  const totalRemaining = PRAYERS.reduce(
     (sum, prayer) =>
       sum +
       Math.max(
         0,
-        Number(targets[prayer.id] || 0) -
-          completedByPrayer[prayer.id]
+        getNumber(targets[prayer.key]) -
+          getNumber(totals[prayer.key])
       ),
     0
   );
 
-  const overallProgress =
-    targetTotal > 0
-      ? Math.min(
-          100,
-          Math.round((completedTotal / targetTotal) * 100)
-        )
-      : 0;
+  // Inclusive date calculation using UTC.
+  const calculatorDays = useMemo(() => {
+    if (!fromDate || !toDate) return 0;
 
-  const selectedKey = selectedDate ? dateKey(selectedDate) : "";
-  const selectedRecord = log[selectedKey] || {};
-  const selectedMissed = missedQaza[selectedKey] || {};
+    const [fy, fm, fd] = fromDate.split("-").map(Number);
+    const [ty, tm, td] = toDate.split("-").map(Number);
 
-  const currentYear = todayKey
-    ? Number(todayKey.slice(0, 4))
-    : 2026;
+    const start = Date.UTC(fy, fm - 1, fd);
+    const end = Date.UTC(ty, tm - 1, td);
 
-  const years = Array.from(
-    { length: 100 },
-    (_, index) => currentYear - index
-  );
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+      return 0;
+    }
 
-  const calculatedDays = calculateQazaDays(
-    qazaStartDate,
-    qazaEndDate
+    return Math.floor((end - start) / 86400000) + 1;
+  }, [fromDate, toDate]);
+
+  const adjustedDays = Math.max(
+    0,
+    calculatorDays -
+      Math.min(calculatorDays, getNumber(dayAdjustment))
   );
 
   const selectedPrayerCount = PRAYERS.filter(
-    (prayer) => calculatorPrayers[prayer.id]
+    ({ key }) => selectedPrayers[key]
   ).length;
 
-  const calculatedTotal = calculatedDays * selectedPrayerCount;
+  const estimatedPrayers = adjustedDays * selectedPrayerCount;
 
-  const page = dark
-    ? "min-h-screen bg-[#0b1120] text-slate-100"
-    : "min-h-screen bg-slate-50 text-slate-900";
+  function toggleCalculatorPrayer(key) {
+    setSelectedPrayers((previous) => ({
+      ...previous,
+      [key]: !previous[key],
+    }));
+  }
 
-  const card = dark
-    ? "rounded-2xl border border-slate-800 bg-[#111b2e] shadow-lg shadow-black/10"
-    : "rounded-2xl border border-slate-200 bg-white shadow-sm";
+  function selectAllCalculatorPrayers(value) {
+    setSelectedPrayers(
+      Object.fromEntries(
+        PRAYERS.map(({ key }) => [key, value])
+      )
+    );
+  }
 
-  const muted = dark ? "text-slate-400" : "text-slate-500";
+  async function handleGoogleSignIn() {
+    setError("");
 
-  const inputClass = dark
-    ? "rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-emerald-500"
-    : "rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-900 outline-none focus:border-emerald-500";
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Google sign-in failed.");
+    }
+  }
 
-  const secondaryButton = dark
-    ? "border border-slate-700 bg-slate-800 text-slate-100 hover:bg-slate-700"
-    : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100";
+  async function handleSignOut() {
+    try {
+      await signOut(auth);
+      setRecords({});
+      setTargets(EMPTY_COUNTS);
+      setMessage("");
+      setError("");
+    } catch (err) {
+      console.error(err);
+      setError("Could not sign out. Please try again.");
+    }
+  }
 
-  const primaryButton =
-    "bg-emerald-600 text-white hover:bg-emerald-500";
+  async function saveRecord(nextCounts) {
+    if (!user || !selectedKey) return false;
 
-  const iconButton =
-    "inline-flex h-9 w-9 items-center justify-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-30";
+    setError("");
+    setMessage("");
 
-  // Add or undo completed Qaza entries for the selected date.
-  function changeCount(prayerId, amount) {
-    if (!selectedDate) return;
+    const normalized = normalizeCounts(nextCounts);
+    const previousRecord = records[selectedKey];
 
-    setLog((current) => {
-      const key = dateKey(selectedDate);
-      const record = current[key] || {};
+    setRecords((previous) => ({
+      ...previous,
+      [selectedKey]: normalized,
+    }));
 
-      const count = Math.max(
-        0,
-        Number(record[prayerId] || 0) + amount
+    try {
+      await setDoc(
+        doc(db, "users", user.uid, "qazaRecords", selectedKey),
+        {
+          ...normalized,
+          date: selectedKey,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
       );
 
-      return {
-        ...current,
-        [key]: {
-          ...record,
-          [prayerId]: count,
-        },
-      };
-    });
+      setMessage("Daily Qaza record saved.");
+      return true;
+    } catch (err) {
+      console.error("Failed to save Qaza record:", err);
+
+      setRecords((previous) => {
+        const restored = { ...previous };
+
+        if (previousRecord) {
+          restored[selectedKey] = previousRecord;
+        } else {
+          delete restored[selectedKey];
+        }
+
+        return restored;
+      });
+
+      setError(
+        "Could not save the record. Check your connection and Firestore rules."
+      );
+
+      return false;
+    }
   }
 
-  // ADD QAZA FEATURE:
-  // Record a missed prayer for the currently selected date.
-  // The same prayer cannot be added twice on that date.
-  function addQaza(prayerId) {
-    if (!selectedKey || selectedMissed[prayerId]) return;
+  async function updatePrayer(key, amount) {
+    if (!selectedKey) return;
 
-    setMissedQaza((current) => ({
-      ...current,
-      [selectedKey]: {
-        ...(current[selectedKey] || {}),
-        [prayerId]: true,
-      },
-    }));
-
-    // Increase the total Qaza target by one.
-    setTargets((current) => ({
-      ...current,
-      [prayerId]: Number(current[prayerId] || 0) + 1,
-    }));
-  }
-
-  // Remove a missed-prayer record and reverse its target increase.
-  function undoAddQaza(prayerId) {
-    if (!selectedKey || !selectedMissed[prayerId]) return;
-
-    const confirmed = window.confirm(
-      `Remove the missed ${PRAYERS.find((p) => p.id === prayerId)?.name} record for ${selectedKey}?`
-    );
-
-    if (!confirmed) return;
-
-    setMissedQaza((current) => {
-      const updatedDate = { ...(current[selectedKey] || {}) };
-      delete updatedDate[prayerId];
-
-      return {
-        ...current,
-        [selectedKey]: updatedDate,
-      };
-    });
-
-    setTargets((current) => ({
-      ...current,
-      [prayerId]: Math.max(
+    const nextCounts = {
+      ...selectedCounts,
+      [key]: Math.max(
         0,
-        Number(current[prayerId] || 0) - 1
+        getNumber(selectedCounts[key]) + amount
       ),
-    }));
+    };
+
+    await saveRecord(nextCounts);
+  }
+
+  // ADD QAZA: Increase only the selected prayer's overall target.
+  async function addQazaToPrayer(key) {
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (savingPrayer) return;
+
+    setError("");
+    setMessage("");
+    setSavingPrayer(key);
+
+    const previousTargets = targets;
+    const nextTargets = {
+      ...targets,
+      [key]: getNumber(targets[key]) + 1,
+    };
+
+    // Update the screen immediately.
+    setTargets(nextTargets);
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: nextTargets,
+          darkMode,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      const prayer = PRAYERS.find((item) => item.key === key);
+
+      setMessage(`Added 1 Qaza to ${prayer?.label || key}.`);
+    } catch (err) {
+      console.error("Failed to add Qaza:", err);
+
+      setTargets(previousTargets);
+      setError(
+        "Could not add Qaza. Please check your connection and try again."
+      );
+    } finally {
+      setSavingPrayer(null);
+    }
+  }
+
+  // Apply the calculator result to selected prayer targets.
+  async function applyCalculatorToTargets() {
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (calculatorDays <= 0 || selectedPrayerCount === 0) {
+      setError("Choose a valid date range and at least one prayer.");
+      return;
+    }
+
+    const previousTargets = targets;
+    const nextTargets = { ...targets };
+
+    PRAYERS.forEach(({ key }) => {
+      if (selectedPrayers[key]) {
+        nextTargets[key] = adjustedDays;
+      }
+    });
+
+    setTargets(nextTargets);
+    setError("");
+    setMessage("");
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: nextTargets,
+          darkMode,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      setShowCalculator(false);
+      setMessage("Qaza targets updated successfully.");
+    } catch (err) {
+      console.error("Failed to apply calculator:", err);
+      setTargets(previousTargets);
+      setError("Could not update targets. Please try again.");
+    }
+  }
+
+  async function saveTargets() {
+    if (!user) return;
+
+    const nextTargets = normalizeCounts(targets);
+    setError("");
+    setMessage("");
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: nextTargets,
+          darkMode,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      setTargets(nextTargets);
+      setShowTargets(false);
+      setMessage("Targets saved.");
+    } catch (err) {
+      console.error(err);
+      setError("Could not save targets. Check your Firestore rules.");
+    }
+  }
+
+  async function toggleDarkMode() {
+    const nextValue = !darkMode;
+    const previousValue = darkMode;
+
+    setDarkMode(nextValue);
+
+    if (!user) return;
+
+    try {
+      await setDoc(
+        settingsRef(user.uid),
+        {
+          targets: normalizeCounts(targets),
+          darkMode: nextValue,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      setDarkMode(previousValue);
+      setError("Could not save the theme preference.");
+    }
+  }
+
+  async function resetSelectedDate() {
+    if (!selectedKey) return;
+
+    if (
+      !window.confirm(
+        `Reset all prayer counts for ${selectedKey}?`
+      )
+    ) {
+      return;
+    }
+
+    await saveRecord(EMPTY_COUNTS);
   }
 
   function changeMonth(amount) {
@@ -306,828 +535,661 @@ export default function Home() {
     );
   }
 
-  function selectDay(day) {
-    setSelectedDate(day);
-    setVisibleMonth(
-      new Date(day.getFullYear(), day.getMonth(), 1)
+  function selectCalendarDay(day) {
+    if (!visibleMonth) return;
+
+    setSelectedDate(
+      new Date(
+        visibleMonth.getFullYear(),
+        visibleMonth.getMonth(),
+        day
+      )
     );
   }
 
   function goToToday() {
-    const today = new Date();
+    const now = new Date();
 
-    setSelectedDate(today);
+    setSelectedDate(now);
     setVisibleMonth(
-      new Date(today.getFullYear(), today.getMonth(), 1)
+      new Date(now.getFullYear(), now.getMonth(), 1)
     );
   }
 
-  function resetProgress() {
-    if (
-      !window.confirm(
-        "Reset all completed entries, missed-prayer records, and restore default targets?"
-      )
-    ) {
-      return;
-    }
+  const calendarDays = useMemo(() => {
+    if (!visibleMonth) return [];
 
-    setLog({});
-    setMissedQaza({});
-    setTargets({ ...DEFAULT_TARGETS });
-  }
+    const year = visibleMonth.getFullYear();
+    const month = visibleMonth.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-  function openQazaCalculator() {
-    if (!qazaStartDate || !qazaEndDate) {
-      const today = new Date();
-      const sevenYearsAgo = new Date(today);
+    return [
+      ...Array(firstDay).fill(null),
+      ...Array.from(
+        { length: daysInMonth },
+        (_, index) => index + 1
+      ),
+    ];
+  }, [visibleMonth]);
 
-      sevenYearsAgo.setFullYear(
-        sevenYearsAgo.getFullYear() - 7
-      );
+  const pageClass = darkMode
+    ? "min-h-screen bg-slate-950 text-slate-100"
+    : "min-h-screen bg-slate-50 text-slate-900";
 
-      setQazaStartDate(dateKey(sevenYearsAgo));
-      setQazaEndDate(dateKey(today));
-    }
+  const panelClass = darkMode
+    ? "rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm"
+    : "rounded-2xl border border-slate-200 bg-white p-5 shadow-sm";
 
-    setShowQazaCalculator(true);
-  }
+  const mutedClass = darkMode
+    ? "text-slate-400"
+    : "text-slate-500";
 
-  function applyQazaCalculation() {
-    if (calculatedDays <= 0 || selectedPrayerCount === 0) return;
+  const inputClass = darkMode
+    ? "w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-slate-100 outline-none focus:border-emerald-500"
+    : "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:border-emerald-500";
 
-    setTargets((current) => {
-      const updated = { ...current };
+  const buttonClass = darkMode
+    ? "rounded-xl border border-slate-700 px-4 py-2 hover:bg-slate-800"
+    : "rounded-xl border border-slate-200 px-4 py-2 hover:bg-slate-100";
 
-      PRAYERS.forEach((prayer) => {
-        if (calculatorPrayers[prayer.id]) {
-          updated[prayer.id] = calculatedDays;
-        }
-      });
-
-      return updated;
-    });
-
-    setShowQazaCalculator(false);
-  }
-
-  // Wait for client-side date initialization.
-  if (!selectedDate || !visibleMonth || !todayKey) {
+  if (authLoading) {
     return (
-      <main
-        className={`${page} flex min-h-screen items-center justify-center`}
-      >
-        <p className={muted}>Loading Qaza Tracker...</p>
+      <main className={pageClass}>
+        <div className="flex min-h-screen items-center justify-center">
+          <p className={mutedClass}>Checking your sign-in...</p>
+        </div>
       </main>
     );
   }
 
-  const firstDay = new Date(
-    visibleMonth.getFullYear(),
-    visibleMonth.getMonth(),
-    1
-  );
+  if (!user) {
+    return (
+      <main className={pageClass}>
+        <div className="flex min-h-screen items-center justify-center p-5">
+          <section className={`${panelClass} w-full max-w-md text-center`}>
+            <div className="mb-4 text-5xl">🕌</div>
+            <h1 className="text-3xl font-bold">Qaza Tracker</h1>
 
-  const daysInMonth = new Date(
-    visibleMonth.getFullYear(),
-    visibleMonth.getMonth() + 1,
-    0
-  ).getDate();
+            <p className={`mt-3 ${mutedClass}`}>
+              Sign in to track missed prayers and sync your records.
+            </p>
 
-  const weeks = Math.ceil(
-    (firstDay.getDay() + daysInMonth) / 7
-  );
+            {error && (
+              <p className="mt-4 break-words rounded-lg bg-red-100 p-3 text-sm text-red-800">
+                {error}
+              </p>
+            )}
 
-  const calendarDays = Array.from(
-    { length: weeks * 7 },
-    (_, index) =>
-      new Date(
-        visibleMonth.getFullYear(),
-        visibleMonth.getMonth(),
-        index - firstDay.getDay() + 1
-      )
-  );
+            <button
+              onClick={handleGoogleSignIn}
+              className="mt-6 w-full rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white hover:bg-emerald-700"
+            >
+              Continue with Google
+            </button>
+          </section>
+        </div>
+      </main>
+    );
+  }
 
   return (
-    <main className={`${page} transition-colors duration-300`}>
-      <div className="mx-auto max-w-7xl space-y-8 px-4 py-8 md:px-8">
-
-        {/* Header */}
-        <header className="flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
+    <main className={pageClass}>
+      <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+        {/* HEADER */}
+        <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <div className={`mb-2 flex items-center gap-2 text-sm ${muted}`}>
-              <CalendarDays size={17} />
-              Personal worship tracker
-            </div>
-
-            <h1 className="text-3xl font-bold tracking-tight md:text-4xl">
-              Qaza Namaz Tracker
-            </h1>
-
-            <p className={`mt-2 text-sm ${muted}`}>
-              Make progress one Qaza prayer at a time.
+            <p className="text-sm font-medium text-emerald-500">
+              YOUR DAILY WORSHIP
+            </p>
+            <h1 className="mt-1 text-3xl font-bold">Qaza Tracker</h1>
+            <p className={`mt-1 text-sm ${mutedClass}`}>
+              Track your missed prayers, one day at a time.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <div className={`${card} flex items-center gap-2 px-3 py-2 text-sm`}>
-              <CheckCircle2 size={17} className="text-emerald-500" />
-              Frontend demo
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setDark((current) => !current)}
-              className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold ${secondaryButton}`}
-            >
-              {dark ? <Sun size={18} /> : <Moon size={18} />}
-              {dark ? "Light Mode" : "Dark Mode"}
+          <div className="flex flex-wrap gap-2">
+            <button onClick={toggleDarkMode} className={buttonClass}>
+              {darkMode ? "☀️ Light mode" : "🌙 Dark mode"}
             </button>
 
             <button
-              type="button"
-              onClick={resetProgress}
-              className={`inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm ${secondaryButton}`}
+              onClick={() => setShowTargets((value) => !value)}
+              className={buttonClass}
             >
-              <RotateCcw size={16} />
-              Reset
+              Targets
+            </button>
+
+            <button onClick={handleSignOut} className={buttonClass}>
+              Sign out
             </button>
           </div>
         </header>
 
-        {/* Summary cards */}
-        <section className="grid gap-4 sm:grid-cols-3">
-          {[
-            {
-              title: "Qaza completed",
-              value: completedTotal,
-              description: "All prayer categories",
-            },
-            {
-              title: "Qaza remaining",
-              value: remainingTotal,
-              description: "Based on your targets",
-            },
-            {
-              title: "Overall progress",
-              value: `${overallProgress}%`,
-              description: `${completedTotal.toLocaleString("en-IN")} of ${targetTotal.toLocaleString("en-IN")} entries`,
-              progress: overallProgress,
-            },
-          ].map((item) => (
-            <section key={item.title} className={`${card} p-5`}>
-              <p className={`text-sm font-medium ${muted}`}>
-                {item.title}
-              </p>
+        {error && (
+          <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">
+            {error}
+          </div>
+        )}
 
-              <p className="mt-3 text-3xl font-bold">
-                {typeof item.value === "number"
-                  ? item.value.toLocaleString("en-IN")
-                  : item.value}
-              </p>
+        {message && (
+          <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-800">
+            {message}
+          </div>
+        )}
 
-              {item.progress !== undefined && (
-                <div
-                  className={`mt-4 h-2 overflow-hidden rounded-full ${
-                    dark ? "bg-slate-800" : "bg-slate-100"
-                  }`}
-                >
-                  <div
-                    className="h-full rounded-full bg-emerald-500 transition-all"
-                    style={{ width: `${item.progress}%` }}
-                  />
-                </div>
-              )}
-
-              <p className={`mt-2 text-xs ${muted}`}>
-                {item.description}
-              </p>
-            </section>
-          ))}
-        </section>
-
-        {/* Calendar and daily tracker */}
-        <section className="grid items-start gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-
-          {/* Calendar */}
-          <section className={card}>
-            <div className="flex flex-col gap-4 p-5">
-              <div>
-                <h2 className="text-xl font-bold">Qaza Calendar</h2>
-                <p className={`mt-1 text-sm ${muted}`}>
-                  Select any month, year, and date.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  aria-label="Previous month"
-                  onClick={() => changeMonth(-1)}
-                  className={`${iconButton} ${secondaryButton}`}
-                >
-                  <ChevronLeft size={18} />
-                </button>
-
-                <select
-                  value={visibleMonth.getMonth()}
-                  onChange={(event) =>
-                    setVisibleMonth(
-                      new Date(
-                        visibleMonth.getFullYear(),
-                        Number(event.target.value),
-                        1
-                      )
-                    )
-                  }
-                  className={`${inputClass} min-w-36 flex-1`}
-                  aria-label="Select month"
-                >
-                  {MONTHS.map((month, index) => (
-                    <option key={month} value={index}>
-                      {month}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={visibleMonth.getFullYear()}
-                  onChange={(event) =>
-                    setVisibleMonth(
-                      new Date(
-                        Number(event.target.value),
-                        visibleMonth.getMonth(),
-                        1
-                      )
-                    )
-                  }
-                  className={`${inputClass} w-28`}
-                  aria-label="Select year"
-                >
-                  {years.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
-
-                <button
-                  type="button"
-                  aria-label="Next month"
-                  onClick={() => changeMonth(1)}
-                  className={`${iconButton} ${secondaryButton}`}
-                >
-                  <ChevronRight size={18} />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={goToToday}
-                  className={`rounded-lg px-3 py-2 text-sm ${secondaryButton}`}
-                >
-                  Today
-                </button>
-              </div>
-
-              <p className={`text-sm font-medium ${muted}`}>
-                {MONTHS[visibleMonth.getMonth()]}{" "}
-                {visibleMonth.getFullYear()}
-              </p>
-            </div>
-
-            <div className="px-3 pb-5 sm:px-5">
-              <div className="grid grid-cols-7 gap-1.5">
-                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
-                  (day) => (
-                    <div
-                      key={day}
-                      className={`pb-2 text-center text-xs font-semibold ${muted}`}
-                    >
-                      {day}
-                    </div>
-                  )
-                )}
-
-                {calendarDays.map((day) => {
-                  const key = dateKey(day);
-                  const isSelected = key === selectedKey;
-
-                  const isCurrentMonth =
-                    day.getMonth() === visibleMonth.getMonth() &&
-                    day.getFullYear() === visibleMonth.getFullYear();
-
-                  const total = getDayTotal(log, day);
-                  const missedCount = Object.values(
-                    missedQaza[key] || {}
-                  ).filter(Boolean).length;
-
-                  const dayClass = isSelected
-                    ? "border-emerald-500 bg-emerald-600 text-white"
-                    : dark
-                    ? "border-slate-800 bg-slate-900/70 hover:border-slate-600"
-                    : "border-slate-100 bg-slate-50 hover:border-slate-300";
-
-                  return (
-                    <button
-                      type="button"
-                      key={key}
-                      onClick={() => selectDay(day)}
-                      aria-pressed={isSelected}
-                      aria-label={`${formatDate(day)}, ${total} completed, ${missedCount} missed`}
-                      className={`flex min-h-[68px] flex-col items-center rounded-xl border p-1.5 transition sm:min-h-[78px] ${dayClass} ${
-                        !isCurrentMonth ? "opacity-35" : ""
-                      }`}
-                    >
-                      <span className="text-sm font-semibold">
-                        {day.getDate()}
-                      </span>
-
-                      {total > 0 && (
-                        <span
-                          className={`mt-1 rounded-md px-1 py-0.5 text-[10px] font-semibold ${
-                            isSelected
-                              ? "bg-white/20 text-white"
-                              : "bg-emerald-500/15 text-emerald-500"
-                          }`}
-                        >
-                          {total} done
-                        </span>
-                      )}
-
-                      {missedCount > 0 && (
-                        <span
-                          className={`mt-0.5 text-[10px] font-semibold ${
-                            isSelected ? "text-white" : "text-amber-500"
-                          }`}
-                        >
-                          {missedCount} missed
-                        </span>
-                      )}
-
-                      {total === 0 && missedCount === 0 && (
-                        <span className="mt-1 text-[10px] opacity-40">
-                          —
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <p className={`mt-4 text-xs ${muted}`}>
-                Select a date to record missed or completed Qaza prayers.
-              </p>
-            </div>
-          </section>
-
-          {/* Daily prayer counters and Add Qaza */}
-          <section className={card}>
-            <div className="p-5">
-              <h2 className="text-xl font-bold">Record your Qaza</h2>
-
-              <p className={`mt-2 text-sm ${muted}`}>
-                {formatDate(selectedDate)}
-              </p>
-
-              <p className={`mt-1 text-xs ${muted}`}>
-                Use Add Qaza to record a missed prayer for this date.
-                Use + to record a completed Qaza.
-              </p>
-            </div>
-
-            <div className="space-y-3 px-4 pb-5 sm:px-5">
-              {PRAYERS.map((prayer) => {
-                const count = Number(
-                  selectedRecord[prayer.id] || 0
-                );
-
-                const isMissed = Boolean(
-                  selectedMissed[prayer.id]
-                );
-
-                return (
-                  <div
-                    key={prayer.id}
-                    className={`flex items-center justify-between gap-3 rounded-xl border p-3 ${
-                      dark ? "border-slate-800" : "border-slate-200"
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <p className="font-semibold">{prayer.name}</p>
-
-                      <p className={`mt-0.5 text-xs ${muted}`}>
-                        {prayer.type}
-                      </p>
-
-                      <button
-                        type="button"
-                        disabled={isMissed}
-                        onClick={() => addQaza(prayer.id)}
-                        className={`mt-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed ${
-                          isMissed
-                            ? dark
-                              ? "bg-emerald-950 text-emerald-300"
-                              : "bg-emerald-50 text-emerald-700"
-                            : "bg-amber-500/10 text-amber-600 hover:bg-amber-500/20"
-                        }`}
-                      >
-                        {isMissed ? "Qaza Added" : "Add Qaza"}
-                      </button>
-
-                      {isMissed && (
-                        <button
-                          type="button"
-                          onClick={() => undoAddQaza(prayer.id)}
-                          className="ml-2 mt-2 text-xs text-red-500 hover:underline"
-                        >
-                          Undo
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-                      <button
-                        type="button"
-                        disabled={count === 0}
-                        aria-label={`Undo completed ${prayer.name}`}
-                        onClick={() => changeCount(prayer.id, -1)}
-                        className={`${iconButton} ${secondaryButton}`}
-                      >
-                        <Minus size={16} />
-                      </button>
-
-                      <span className="w-7 text-center font-bold tabular-nums">
-                        {count}
-                      </span>
-
-                      <button
-                        type="button"
-                        aria-label={`Add completed ${prayer.name}`}
-                        onClick={() => changeCount(prayer.id, 1)}
-                        className={`${iconButton} ${primaryButton}`}
-                      >
-                        <Plus size={16} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-
-              <div
-                className={`flex items-center justify-between rounded-xl p-4 ${
-                  dark ? "bg-slate-900" : "bg-slate-100"
-                }`}
-              >
-                <span className="text-sm font-medium">
-                  Completed on this date
-                </span>
-
-                <span className="text-xl font-bold">
-                  {getDayTotal(log, selectedDate)}
-                </span>
-              </div>
-
-              <div
-                className={`flex items-center justify-between rounded-xl p-4 ${
-                  dark ? "bg-amber-950/40" : "bg-amber-50"
-                }`}
-              >
-                <span className="text-sm font-medium">
-                  Missed prayers recorded
-                </span>
-
-                <span className="text-xl font-bold text-amber-500">
-                  {
-                    Object.values(selectedMissed).filter(Boolean).length
-                  }
-                </span>
-              </div>
-            </div>
-          </section>
-        </section>
-
-        {/* Qaza calculator trigger */}
-        <section className={`${card} p-5`}>
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        {/* QAZA CALCULATOR LAUNCHER */}
+        <section className={panelClass}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-bold">Calculate Your Qaza</h2>
-
-              <p className={`mt-1 text-sm ${muted}`}>
-                Estimate missed prayers between two dates.
+              <h2 className="text-xl font-bold">Qaza Date Calculator</h2>
+              <p className={`mt-1 text-sm ${mutedClass}`}>
+                Calculate missed prayers using a date range.
               </p>
             </div>
 
             <button
-              type="button"
-              onClick={openQazaCalculator}
-              className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold ${primaryButton}`}
+              onClick={() => setShowCalculator(true)}
+              className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700"
             >
-              <Calculator size={18} />
-              Calculate Qaza
+              Open calculator
             </button>
           </div>
         </section>
 
-        {/* Qaza calculator popup */}
-        {showQazaCalculator && (
+        {/* QAZA DATE CALCULATOR MODAL */}
+        {showCalculator && (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-4"
-            onMouseDown={(event) => {
+            className="fixed inset-0 z-50 overflow-y-auto bg-black/60 p-3 sm:p-6"
+            onClick={(event) => {
               if (event.target === event.currentTarget) {
-                setShowQazaCalculator(false);
+                setShowCalculator(false);
               }
             }}
           >
-            <section
+            <div
               role="dialog"
               aria-modal="true"
               aria-labelledby="qaza-calculator-title"
-              className={`my-auto w-full max-w-lg rounded-2xl border p-5 shadow-2xl sm:p-6 ${
-                dark
-                  ? "border-slate-700 bg-[#111b2e] text-slate-100"
+              className={`mx-auto my-4 max-w-4xl rounded-3xl border p-5 sm:p-8 ${
+                darkMode
+                  ? "border-slate-700 bg-slate-900 text-slate-100"
                   : "border-slate-200 bg-white text-slate-900"
               }`}
             >
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2
                     id="qaza-calculator-title"
-                    className="text-xl font-bold"
+                    className="text-3xl font-bold"
                   >
                     Qaza Date Calculator
                   </h2>
-
-                  <p className={`mt-1 text-sm ${muted}`}>
+                  <p className={`mt-2 ${mutedClass}`}>
                     Choose the period you want to calculate.
                   </p>
                 </div>
 
                 <button
-                  type="button"
+                  onClick={() => setShowCalculator(false)}
+                  className={`rounded-xl border px-4 py-2 text-2xl ${buttonClass}`}
                   aria-label="Close calculator"
-                  onClick={() => setShowQazaCalculator(false)}
-                  className={`${iconButton} ${secondaryButton}`}
                 >
-                  <X size={18} />
+                  ×
                 </button>
               </div>
 
-              {/* Date range */}
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label
-                    htmlFor="qaza-start-date"
-                    className={`mb-2 block text-sm font-medium ${muted}`}
-                  >
-                    From date
-                  </label>
-
+              <div className="mt-8 grid gap-5 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-3 block font-medium">From date</span>
                   <input
-                    id="qaza-start-date"
                     type="date"
-                    value={qazaStartDate}
-                    max={qazaEndDate || todayKey}
-                    onChange={(event) =>
-                      setQazaStartDate(event.target.value)
-                    }
-                    className={`${inputClass} w-full`}
+                    value={fromDate}
+                    max={toDate || todayKey || undefined}
+                    onChange={(event) => {
+                      setFromDate(event.target.value);
+                      setDayAdjustment("0");
+                    }}
+                    className={inputClass}
                   />
-                </div>
+                </label>
 
-                <div>
-                  <label
-                    htmlFor="qaza-end-date"
-                    className={`mb-2 block text-sm font-medium ${muted}`}
-                  >
-                    To date
-                  </label>
-
+                <label className="block">
+                  <span className="mb-3 block font-medium">To date</span>
                   <input
-                    id="qaza-end-date"
                     type="date"
-                    value={qazaEndDate}
-                    min={qazaStartDate || undefined}
-                    max={todayKey}
-                    onChange={(event) =>
-                      setQazaEndDate(event.target.value)
-                    }
-                    className={`${inputClass} w-full`}
+                    value={toDate}
+                    min={fromDate || undefined}
+                    max={todayKey || undefined}
+                    onChange={(event) => {
+                      setToDate(event.target.value);
+                      setDayAdjustment("0");
+                    }}
+                    className={inputClass}
                   />
-                </div>
+                </label>
               </div>
 
-              {/* Prayer selection */}
-              <div className="mt-6">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold">
-                    Select prayers to include
-                  </p>
+              <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-xl font-bold">
+                  Select prayers to include
+                </h3>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setCalculatorPrayers((current) => {
-                        const allSelected = PRAYERS.every(
-                          (prayer) => current[prayer.id]
-                        );
-
-                        return Object.fromEntries(
-                          PRAYERS.map((prayer) => [
-                            prayer.id,
-                            !allSelected,
-                          ])
-                        );
-                      })
-                    }
-                    className="text-xs font-semibold text-emerald-500"
-                  >
-                    {PRAYERS.every(
-                      (prayer) => calculatorPrayers[prayer.id]
+                <button
+                  onClick={() =>
+                    selectAllCalculatorPrayers(
+                      !PRAYERS.every(({ key }) => selectedPrayers[key])
                     )
-                      ? "Deselect all"
-                      : "Select all"}
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  {PRAYERS.map((prayer) => (
-                    <label
-                      key={prayer.id}
-                      className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3 ${
-                        dark
-                          ? "border-slate-700 hover:bg-slate-800"
-                          : "border-slate-200 hover:bg-slate-50"
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={calculatorPrayers[prayer.id]}
-                        onChange={(event) =>
-                          setCalculatorPrayers((current) => ({
-                            ...current,
-                            [prayer.id]: event.target.checked,
-                          }))
-                        }
-                        className="h-4 w-4 accent-emerald-600"
-                      />
-
-                      <span>
-                        <span className="block text-sm font-semibold">
-                          {prayer.name}
-                        </span>
-
-                        <span className={`block text-xs ${muted}`}>
-                          {prayer.type}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                  }
+                  className="font-semibold text-emerald-500"
+                >
+                  {PRAYERS.every(({ key }) => selectedPrayers[key])
+                    ? "Deselect all"
+                    : "Select all"}
+                </button>
               </div>
 
-              {/* Calculator results */}
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                {PRAYERS.map((prayer) => (
+                  <label
+                    key={prayer.key}
+                    className={`flex cursor-pointer items-center gap-4 rounded-2xl border p-5 transition ${
+                      selectedPrayers[prayer.key]
+                        ? "border-emerald-500"
+                        : darkMode
+                          ? "border-slate-700"
+                          : "border-slate-200"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedPrayers[prayer.key]}
+                      onChange={() => toggleCalculatorPrayer(prayer.key)}
+                      className="h-5 w-5 accent-emerald-600"
+                    />
+
+                    <span>
+                      <span className="block text-lg font-bold">
+                        {prayer.label}
+                      </span>
+                      <span className={`block text-sm ${mutedClass}`}>
+                        {prayer.type}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
               <div
-                className={`mt-6 rounded-xl p-4 ${
-                  dark ? "bg-slate-900" : "bg-emerald-50"
+                className={`mt-7 rounded-3xl p-6 ${
+                  darkMode ? "bg-emerald-950/50" : "bg-emerald-50"
                 }`}
               >
-                <p className={`text-sm ${muted}`}>
+                <p className={mutedClass}>
                   Days in selected period (inclusive)
                 </p>
 
-                <p className="mt-1 text-2xl font-bold">
-                  {calculatedDays > 0
-                    ? calculatedDays.toLocaleString("en-IN")
-                    : "Invalid date range"}
+                <p className="mt-2 text-4xl font-bold">
+                  {adjustedDays.toLocaleString("en-IN")}
                 </p>
 
-                <div className="mt-4 flex items-center justify-between gap-3">
-                  <span className={`text-sm ${muted}`}>
-                    Estimated prayers
-                  </span>
-
-                  <span className="text-xl font-bold text-emerald-500">
-                    {calculatedDays > 0
-                      ? calculatedTotal.toLocaleString("en-IN")
-                      : "0"}
+                <div className="mt-7 flex flex-wrap items-center justify-between gap-3">
+                  <span className={mutedClass}>Estimated prayers</span>
+                  <span className="text-3xl font-bold text-emerald-500">
+                    {estimatedPrayers.toLocaleString("en-IN")}
                   </span>
                 </div>
 
-                <p className={`mt-2 text-xs ${muted}`}>
+                <p className={`mt-4 text-sm ${mutedClass}`}>
                   One Qaza per selected prayer per day.
                 </p>
+
+                <label className="mt-5 block">
+                  <span className="mb-2 block text-sm font-medium">
+                    Days when you did not miss prayers
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    max={calculatorDays}
+                    value={dayAdjustment}
+                    onChange={(event) => {
+                      const raw = event.target.value;
+
+                      if (raw === "") {
+                        setDayAdjustment("");
+                        return;
+                      }
+
+                      setDayAdjustment(
+                        String(
+                          Math.min(calculatorDays, getNumber(raw))
+                        )
+                      );
+                    }}
+                    onBlur={() => {
+                      if (dayAdjustment === "") {
+                        setDayAdjustment("0");
+                      }
+                    }}
+                    className={inputClass}
+                  />
+                </label>
               </div>
 
-              <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <div className="mt-7 flex flex-wrap justify-end gap-3">
                 <button
-                  type="button"
-                  onClick={() => setShowQazaCalculator(false)}
-                  className={`rounded-xl px-4 py-3 text-sm font-semibold ${secondaryButton}`}
+                  onClick={() => setShowCalculator(false)}
+                  className={`rounded-xl border px-5 py-3 font-semibold ${buttonClass}`}
                 >
                   Cancel
                 </button>
 
                 <button
-                  type="button"
-                  disabled={
-                    calculatedDays <= 0 || selectedPrayerCount === 0
-                  }
-                  onClick={applyQazaCalculation}
-                  className={`rounded-xl px-4 py-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${primaryButton}`}
+                  onClick={applyCalculatorToTargets}
+                  disabled={adjustedDays === 0 || selectedPrayerCount === 0}
+                  className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Apply to targets
                 </button>
               </div>
 
-              <p className={`mt-4 text-xs leading-5 ${muted}`}>
+              <p className={`mt-6 text-sm leading-7 ${mutedClass}`}>
                 Applying replaces the target for each selected prayer with
-                the number of days in the chosen period. Unselected targets
-                remain unchanged. Adjust the estimate for days when you
-                did not miss a prayer.
+                the adjusted number of days. Unselected targets remain
+                unchanged. Review your estimate before applying.
               </p>
-            </section>
+            </div>
           </div>
         )}
 
-        {/* Editable Qaza targets */}
-        <section>
-          <div className="mb-4">
-            <h2 className="text-2xl font-bold">Qaza targets</h2>
-
-            <p className={`mt-1 text-sm ${muted}`}>
-              Set the estimated outstanding count for each prayer.
+        {/* TARGET SETTINGS */}
+        {showTargets && (
+          <section className={panelClass}>
+            <h2 className="text-xl font-bold">Qaza targets</h2>
+            <p className={`mt-1 text-sm ${mutedClass}`}>
+              Set the target count for each prayer.
             </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {PRAYERS.map((prayer) => (
+                <label key={prayer.key} className="space-y-2">
+                  <span className="block font-medium">{prayer.label}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={targets[prayer.key]}
+                    onChange={(event) =>
+                      setTargets((previous) => ({
+                        ...previous,
+                        [prayer.key]: getNumber(event.target.value),
+                      }))
+                    }
+                    className={inputClass}
+                  />
+                </label>
+              ))}
+            </div>
+
+            <button
+              onClick={saveTargets}
+              className="mt-5 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700"
+            >
+              Save targets
+            </button>
+          </section>
+        )}
+
+        {/* SUMMARY CARDS */}
+        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className={panelClass}>
+            <p className={`text-sm ${mutedClass}`}>Recorded Qaza prayers</p>
+            <p className="mt-2 text-3xl font-bold">{totalRecorded}</p>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className={panelClass}>
+            <p className={`text-sm ${mutedClass}`}>Total target</p>
+            <p className="mt-2 text-3xl font-bold">{totalTarget}</p>
+          </div>
+
+          <div className={panelClass}>
+            <p className={`text-sm ${mutedClass}`}>Target remaining</p>
+            <p className="mt-2 text-3xl font-bold">{totalRemaining}</p>
+          </div>
+
+          <div className={panelClass}>
+            <p className={`text-sm ${mutedClass}`}>Selected day</p>
+            <p className="mt-2 text-xl font-bold">
+              {selectedDate ? formatDate(selectedDate) : "Loading date..."}
+            </p>
+          </div>
+        </section>
+
+        <div className="grid items-start gap-6 lg:grid-cols-2">
+          {/* CALENDAR */}
+          <section className={panelClass}>
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={() => changeMonth(-1)}
+                disabled={!visibleMonth}
+                className={buttonClass}
+                aria-label="Previous month"
+              >
+                ←
+              </button>
+
+              <h2 className="text-xl font-bold">
+                {visibleMonth ? formatMonth(visibleMonth) : "Calendar"}
+              </h2>
+
+              <button
+                onClick={() => changeMonth(1)}
+                disabled={!visibleMonth}
+                className={buttonClass}
+                aria-label="Next month"
+              >
+                →
+              </button>
+            </div>
+
+            <div className="mt-5 grid grid-cols-7 gap-1 text-center text-sm">
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
+                (day) => (
+                  <div key={day} className={`py-2 font-semibold ${mutedClass}`}>
+                    {day}
+                  </div>
+                )
+              )}
+
+              {calendarDays.map((day, index) => {
+                if (day === null) {
+                  return <div key={`blank-${index}`} />;
+                }
+
+                const dayDate = new Date(
+                  visibleMonth.getFullYear(),
+                  visibleMonth.getMonth(),
+                  day
+                );
+
+                const key = dateKey(dayDate);
+                const isSelected = key === selectedKey;
+                const isToday = key === todayKey;
+                const hasRecords = Boolean(records[key]);
+
+                const dayClass = isSelected
+                  ? "bg-emerald-600 text-white"
+                  : isToday
+                    ? "border border-emerald-500"
+                    : darkMode
+                      ? "hover:bg-slate-800"
+                      : "hover:bg-slate-100";
+
+                return (
+                  <button
+                    key={key}
+                    onClick={() => selectCalendarDay(day)}
+                    className={`relative flex min-h-11 items-center justify-center rounded-lg ${dayClass}`}
+                    aria-pressed={isSelected}
+                    aria-label={`${day} ${formatMonth(visibleMonth)}`}
+                  >
+                    {day}
+                    {hasRecords && (
+                      <span
+                        className={`absolute bottom-1 h-1 w-1 rounded-full ${
+                          isSelected ? "bg-white" : "bg-emerald-500"
+                        }`}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={goToToday}
+              disabled={!todayKey}
+              className={`mt-4 w-full ${buttonClass}`}
+            >
+              Go to today
+            </button>
+          </section>
+
+          {/* DAILY QAZA COUNTERS + ADD QAZA BUTTON */}
+          <section className={panelClass}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-bold">Daily Qaza counts</h2>
+                <p className={`mt-1 text-sm ${mutedClass}`}>
+                  {selectedDate ? formatDate(selectedDate) : "Loading date..."}
+                </p>
+              </div>
+
+              <button onClick={resetSelectedDate} className={buttonClass}>
+                Reset day
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-5">
+              {PRAYERS.map((prayer) => (
+                <div
+                  key={prayer.key}
+                  className={`flex flex-wrap items-center justify-between gap-4 rounded-3xl border p-5 ${
+                    darkMode ? "border-slate-700" : "border-slate-200"
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-2xl font-bold">{prayer.label}</h3>
+
+                    <p className={`mt-1 ${mutedClass}`}>
+                      {prayer.type}
+                    </p>
+
+                    <button
+                      onClick={() => addQazaToPrayer(prayer.key)}
+                      disabled={savingPrayer !== null}
+                      className="mt-4 rounded-2xl bg-orange-100 px-5 py-3 font-semibold text-orange-700 transition hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {savingPrayer === prayer.key
+                        ? "Adding..."
+                        : "Add Qaza"}
+                    </button>
+
+                    <p className={`mt-2 text-sm ${mutedClass}`}>
+                      Target: {getNumber(targets[prayer.key])}
+                    </p>
+
+                    <p className={`text-sm ${mutedClass}`}>
+                      Recorded: {getNumber(totals[prayer.key])}
+                    </p>
+
+                    <p className={`text-sm font-medium ${mutedClass}`}>
+                      Remaining:{" "}
+                      {Math.max(
+                        0,
+                        getNumber(targets[prayer.key]) -
+                          getNumber(totals[prayer.key])
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => updatePrayer(prayer.key, -1)}
+                      disabled={
+                        !selectedKey ||
+                        !selectedCounts[prayer.key]
+                      }
+                      className={`flex h-14 w-14 items-center justify-center rounded-2xl border text-2xl disabled:cursor-not-allowed disabled:opacity-40 ${buttonClass}`}
+                      aria-label={`Decrease ${prayer.label} daily count`}
+                    >
+                      −
+                    </button>
+
+                    <span className="w-8 text-center text-2xl font-bold tabular-nums">
+                      {selectedCounts[prayer.key]}
+                    </span>
+
+                    <button
+                      onClick={() => updatePrayer(prayer.key, 1)}
+                      disabled={!selectedKey}
+                      className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-600 text-3xl text-white hover:bg-emerald-700 disabled:opacity-40"
+                      aria-label={`Increase ${prayer.label} daily count`}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div
+              className={`mt-5 flex items-center justify-between rounded-xl p-4 ${
+                darkMode ? "bg-slate-800" : "bg-slate-100"
+              }`}
+            >
+              <span className="font-semibold">Selected-day total</span>
+              <span className="text-2xl font-bold">
+                {PRAYERS.reduce(
+                  (sum, prayer) =>
+                    sum + getNumber(selectedCounts[prayer.key]),
+                  0
+                )}
+              </span>
+            </div>
+          </section>
+        </div>
+
+        {/* PRAYER SUMMARY */}
+        <section className={panelClass}>
+          <h2 className="text-xl font-bold">Prayer summary</h2>
+          <p className={`mt-1 text-sm ${mutedClass}`}>
+            Recorded counts across all saved dates compared with your targets.
+          </p>
+
+          <div className="mt-4 space-y-4">
             {PRAYERS.map((prayer) => {
-              const target = Number(targets[prayer.id] || 0);
-              const completed = completedByPrayer[prayer.id];
-              const remaining = Math.max(0, target - completed);
+              const target = getNumber(targets[prayer.key]);
+              const recorded = getNumber(totals[prayer.key]);
+              const remaining = Math.max(0, target - recorded);
 
               const progress =
                 target > 0
-                  ? Math.min(
-                      100,
-                      Math.round((completed / target) * 100)
-                    )
+                  ? Math.min(100, Math.round((recorded / target) * 100))
                   : 0;
 
               return (
-                <section key={prayer.id} className={`${card} p-5`}>
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="text-lg font-bold">
-                        {prayer.name}
-                      </h3>
-
-                      <p className={`text-sm ${muted}`}>
-                        {prayer.type}
-                      </p>
-                    </div>
-
-                    <Target size={19} className={muted} />
-                  </div>
-
-                  <label
-                    htmlFor={`target-${prayer.id}`}
-                    className={`mb-2 mt-5 block text-sm ${muted}`}
-                  >
-                    Total Qaza owed
-                  </label>
-
-                  <input
-                    id={`target-${prayer.id}`}
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={targets[prayer.id]}
-                    onChange={(event) => {
-                      const value = Math.max(
-                        0,
-                        Number(event.target.value) || 0
-                      );
-
-                      setTargets((current) => ({
-                        ...current,
-                        [prayer.id]: value,
-                      }));
-                    }}
-                    className={`${inputClass} w-full`}
-                  />
-
-                  <div className="mt-4 flex justify-between gap-2 text-sm">
-                    <span className={muted}>
-                      Done: {completed.toLocaleString("en-IN")}
-                    </span>
-
-                    <span className="font-semibold">
-                      Left: {remaining.toLocaleString("en-IN")}
+                <div key={prayer.key}>
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <span className="font-medium">{prayer.label}</span>
+                    <span className={`text-sm ${mutedClass}`}>
+                      {recorded} recorded / {target} target / {remaining} remaining
                     </span>
                   </div>
 
                   <div
-                    className={`mt-3 h-2 overflow-hidden rounded-full ${
-                      dark ? "bg-slate-800" : "bg-slate-100"
+                    className={`h-2 overflow-hidden rounded-full ${
+                      darkMode ? "bg-slate-800" : "bg-slate-200"
                     }`}
                   >
                     <div
@@ -1135,26 +1197,14 @@ export default function Home() {
                       style={{ width: `${progress}%` }}
                     />
                   </div>
-
-                  <p className={`mt-2 text-right text-xs ${muted}`}>
-                    {progress}% completed
-                  </p>
-                </section>
+                </div>
               );
             })}
           </div>
         </section>
 
-        <footer
-          className={`border-t py-5 text-xs leading-6 ${muted} ${
-            dark ? "border-slate-800" : "border-slate-200"
-          }`}
-        >
-          Frontend demo only: refreshing the page resets completed entries,
-          missed-prayer records, and targets. The default target of 2,555 per
-          prayer is an estimate based on seven years of 365 days. Adjust
-          targets to reflect your actual Qaza. Witr is tracked separately as
-          Wajib according to the Hanafi school.
+        <footer className={`pb-4 text-center text-sm ${mutedClass}`}>
+          Your records and targets are saved to your signed-in Firebase account.
         </footer>
       </div>
     </main>
