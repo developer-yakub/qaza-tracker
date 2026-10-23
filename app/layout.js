@@ -1,3 +1,4 @@
+import AuthGate from "@/components/AuthGate";
 import "./globals.css";
 import Providers from "./providers";
 
